@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AI Audacity – finished & fixed</title>
+<title>AI Audacity – noise-clean edition</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root{--bg:#111;--fg:#eee;--accent:#0bf;--panel:#222;--sel:rgba(0,187,255,.25)}
@@ -29,7 +29,7 @@ canvas{display:block;background:#0a0a0a}
 </head>
 <body>
 
-<!-- 1.  user-gesture overlay -->
+<!-- unlock AudioContext -->
 <div id="startScreen">
   <button id="startBtn">START</button>
 </div>
@@ -47,6 +47,7 @@ canvas{display:block;background:#0a0a0a}
   <button id="delBtn">Delete</button>
   <button id="undoBtn">Undo</button>
   <button id="aiBtn">AI Suggest</button>
+  <button id="cleanBtn">Clean Noise</button>
   <button id="expBtn">Export WAV</button>
   <span style="margin-left:auto">AI Audacity</span>
 </header>
@@ -68,6 +69,9 @@ canvas{display:block;background:#0a0a0a}
     </div>
   </section>
 </main>
+
+<!-- RNNoise engine -->
+<script src="https://cdn.jsdelivr.net/npm/rnnoise-wasm@0.3.0/rnnoise.min.js"></script>
 
 <script>
 /* ==========  tiny state  ========== */
@@ -274,7 +278,7 @@ document.getElementById('expBtn').onclick=()=>{
   };
 };
 
-/* ==========  AI suggest  ========== */
+/* ==========  AI suggest (simple)  ========== */
 document.getElementById('aiBtn').onclick=()=>{
   if(!buffer)return;
   const worker=new Worker(URL.createObjectURL(new Blob([`
@@ -321,6 +325,20 @@ document.getElementById('aiBtn').onclick=()=>{
     };
     document.getElementById('aiNo').onclick=()=>box.style.display='none';
   };
+};
+
+/* ==========  REAL NOISE CLEAN  ========== */
+document.getElementById('cleanBtn').onclick=async()=>{
+  if(!buffer)return;
+  await RNNoise.load();               // fetch 1 MB wasm (once)
+  pushUndo();                         // keep undo
+  const neo=cloneBuffer(buffer);      // work on copy
+  for(let ch=0;ch<neo.numberOfChannels;ch++){
+    const data=neo.getChannelData(ch);
+    const cleaned=RNNoise.reduce(data,ac.sampleRate);
+    neo.copyToChannel(cleaned,ch);
+  }
+  buffer=neo; draw();
 };
 </script>
 </body>
