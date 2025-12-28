@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AI Audacity</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{ --bg:#111; --fg:#eee; --accent:#0bf; --panel:#222}
+  *{box-sizing:border-box;margin:0;font:14px/1.3 "Segoe UI",system-ui}
+  body{display:flex;flex-direction:column;height:100vh;background:var(--bg);color:var(--fg)}
+  header{flex:0 0 44px;background:var(--panel);display:flex;align-items:center;padding:0 8px;gap:8px}
+  button{height:32px;border:0;background:#444;color:var(--fg);padding:0 12px;border-radius:4px;cursor:pointer}
+  button:hover{background:#555}
+  #transport button{background:var(--accent);color:#000}
+  main{flex:1;display:flex;overflow:hidden}
+  #trackList{flex:0 0 180px;background:var(--panel);overflow-y:auto;border-right:1px solid #000}
+  #canvasWrap{flex:1;position:relative;background:#000;overflow:auto}
+  canvas{background:#0a0a0a;display:block}
+  #aiAdvice{position:absolute;bottom:12px;left:12px;right:220px;background:#222;border:1px solid var(--accent);border-radius:6px;padding:10px;display:none;gap:8px;align-items:center}
+  #aiAdvice span{flex:1}
+  #aiAdvice button{background:var(--accent);color:#000}
+  .track{display:flex;align-items:center;height:36px;padding:0 8px;border-bottom:1px solid #000}
+  .track.active{background:#083}
+  label{user-select:none}
+  input[type=range]{width:100px}
+</style>
+</head>
+<body>
+<header>
+  <input type="file" id="loadFile" accept="audio/*">
+  <button id="recBtn">● Rec</button>
+  <span id="transport">
+    <button id="playBtn">▶</button>
+    <button id="stopBtn">⏹</button>
+  </span>
+  <button id="cutBtn">Cut</button>
+  <button id="aiBtn">AI Suggest</button>
+  <span style="margin-left:auto">AI Audacity</span>
+</header>
+
+<main>
+  <section id="trackList"></section>
+  <section id="canvasWrap">
+    <canvas id="wave"></canvas>
+    <div id="aiAdvice">
+      <span id="aiText"></span>
+      <button id="aiOk">Apply</button>
+      <button id="aiNo">Dismiss</button>
+    </div>
+  </section>
+</main>
+
+<script>
+/* ---------- tiny state ---------- */
+const ac = new (window.AudioContext||webkitAudioContext)();
+let buffer, source, node, recNode, recBuffer=[];
+let startSample=0, endSample=0, selActive=false;
+const canvas = document.getElementById('wave');
+const ctx = canvas.getContext('2d');
+const worker = new Worker(URL.createObjectURL(new Blob([
+document.querySelector('#worker1').textContent],{type:'js'})));
+
+/* ---------- canvas sizing ---------- */
+function resize(){canvas.width=canvas.offsetWidth;canvas.height=canvas.offsetHeight; draw();}
+window.addEventListener('resize',resize); resize();
+
+/* ---------- file load ---------- */
+document.getElementById('loadFile').onchange = async e=>{
+  const file = e.target.files[0];
+  buffer = await ac.decodeAudioData(await file.arrayBuffer());
+  draw();
+};
+
+/* ---------- record ---------- */
+let recording=false;
+document.getElementById('recBtn').onclick = async ()=>{
+  if(recording){ stopRec(); return; }
+  recording=true; recBuffer=[];
+  const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  recNode = ac.createMediaStreamSource(stream);
+  const proc = ac.createScriptProcessor(4096,1,1);
+  proc.onaudioprocess = e=> recBuffer.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  recNode.connect(proc); proc.connect(ac.destination);
+  document.getElementById('recBtn').style.background='#d00';
+};
+function stopRec(){
+  recording=false; recNode.disconnect();
+  const len = recBuffer.reduce((a,b)=>a+b.length,0);
+  const data = new Float32Array(len); let off=0;
+  recBuffer.forEach(b=>{data.set(b,off); off+=b.length;});
+  buffer = ac.createBuffer(1,data.length,ac.sampleRate);
+  buffer.copyToChannel(data,0);
+  draw();
+  document.getElementById('recBtn').style.background='';
+}
+
+/* ---------- play / stop ---------- */
+document.getElementById('playBtn').onclick = ()=>{
+  if(source){ source.stop(); }
+  source = ac.createBufferSource();
+  source.buffer = buffer;
+  node = ac.createAnalyser();
+  source.connect(node).connect(ac.destination);
+  source.start();
+};
+document.getElementById('stopBtn').onclick = ()=> source&&source.stop();
+
+/* ---------- draw waveform + selection ---------- */
+function draw(){
+  if(!buffer)return;
+  const w=canvas.width, h=canvas.height;
+  const data=buffer.getChannelData(0);
+  ctx.clearRect(0,0,w,h);
+  const step=data.length/w;
+  ctx.strokeStyle='#0bf'; ctx.beginPath();
+  for(let i=0;i<w;i++){
+    const idx=Math.floor(i*step);
+    const v=data[idx]*.5+.5;
+    const y=h-v*h;
+    i?ctx.lineTo(i,y):ctx.moveTo(i,y);
+  }
+  ctx.stroke();
+  if(selActive){
+    const x1=(startSample/buffer.length)*w, x2=(endSample/buffer.length)*w;
+    ctx.fillStyle='rgba(0,187,255,.15)';
+    ctx.fillRect(x1,0,x2-x1,h);
+  }
+}
+canvas.onmousedown = e=>{
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  selActive=true;
+  startSample=Math.floor((x/canvas.width)*buffer.length);
+  endSample=startSample;
+};
+canvas.onmousemove = e=>{
+  if(!selActive)return;
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  endSample=Math.floor((x/canvas.width)*buffer.length);
+  draw();
+};
+canvas.onmouseup = ()=> selActive=false;
+
+/* ---------- cut ---------- */
+document.getElementById('cutBtn').onclick = ()=>{
+  if(!buffer||!selActive)return;
+  const [a,b]=[Math.min(startSample,endSample), Math.max(startSample,endSample)];
+  const data=buffer.getChannelData(0);
+  const left=data.slice(0,a), right=data.slice(b);
+  const newLen=left.length+right.length;
+  const neo=ac.createBuffer(buffer.numberOfChannels,newLen,buffer.sampleRate);
+  for(let ch=0;ch<buffer.numberOfChannels;ch++){
+    const out=new Float32Array(newLen);
+    out.set(left,0); out.set(right,left.length);
+    neo.copyToChannel(out,ch);
+  }
+  buffer=neo; selActive=false; draw();
+};
+
+/* ---------- AI suggestion ---------- */
+document.getElementById('aiBtn').onclick = ()=>{
+  if(!buffer)return;
+  worker.postMessage({cmd:'analyse',buf:buffer.getChannelData(0)});
+};
+worker.onmessage = e=>{
+  const advice = e.data;
+  document.getElementById('aiText').textContent = advice.text;
+  const box=document.getElementById('aiAdvice');
+  box.style.display='flex';
+  document.getElementById('aiOk').onclick = ()=>{ applyAI(advice); box.style.display='none'; };
+  document.getElementById('aiNo').onclick = ()=> box.style.display='none';
+};
+function applyAI(advice){
+  if(advice.type==='gain'){
+    const data=buffer.getChannelData(0);
+    for(let i=0;i<data.length;i++) data[i]*=advice.factor;
+    draw();
+  }
+  if(advice.type==='trim'){
+    const data=buffer.getChannelData(0);
+    const [a,b]=[Math.floor(advice.start*data.length), Math.floor(advice.end*data.length)];
+    const neo=ac.createBuffer(buffer.numberOfChannels,b-a,buffer.sampleRate);
+    for(let ch=0;ch<buffer.numberOfChannels;ch++){
+      neo.copyToChannel(data.slice(a,b),ch);
+    }
+    buffer=neo; draw();
+  }
+}
+</script>
+<script id="worker1" type="text/js-worker">
+/* ---------- AI worker (runs in separate thread) ---------- */
+self.onmessage = e=>{
+  const buf = e.data.buf;
+  /* very small "AI" : analyse RMS & find leading/trailing silence */
+  let rms=0, max=0;
+  for(let s of buf){ const a=Math.abs(s); rms+=a*a; if(a>max)max=a; }
+  rms=Math.sqrt(rms/buf.length);
+  const head=buf.findIndex(s=>Math.abs(s)>0.01);
+  const tail=buf.length - [...buf].reverse().findIndex(s=>Math.abs(s)>0.01);
+  const suggestions=[];
+  if(max>0.95) suggestions.push({type:'gain', factor:0.8, text:'Clipping detected – reduce gain 20 %'});
+  if(rms<0.05) suggestions.push({type:'gain', factor:2.0, text:'Signal very low – boost 6 dB'});
+  if(head>1000 || tail<buf.length-1000){
+    suggestions.push({type:'trim', start:head/buf.length, end:tail/buf.length, text:'Trim silence at start/end'});
+  }
+  if(!suggestions.length) suggestions.push({text:'No obvious issues found – sounds good!'});
+  self.postMessage(suggestions[0]);
+};
+</script>
+</body>
+</html>
