@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AI Audacity – finished</title>
+<title>AI Audacity – finished & fixed</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root{--bg:#111;--fg:#eee;--accent:#0bf;--panel:#222;--sel:rgba(0,187,255,.25)}
@@ -19,15 +19,21 @@ canvas{display:block;background:#0a0a0a}
 #aiAdvice{position:absolute;bottom:12px;left:12px;right:220px;background:#222;border:1px solid var(--accent);border-radius:6px;padding:10px;display:none;gap:8px}
 #aiAdvice span{flex:1}
 #aiAdvice button{background:var(--accent);color:#000}
-#zoomPan{position:absolute;top:8px;right:8px;display:flex;gap:6px}
+#zoomPan{position:absolute;top:28px;right:8px;display:flex;gap:6px}
 #timeBar{position:absolute;top:0;left:0;right:0;height:20px;background:#000;color:#7f7;font-size:12px;line-height:20px;padding:0 6px}
 #timeBar span{margin-right:12px}
-#editMenu{position:absolute;top:28px;right:8px;background:#222;border:1px solid #444;border-radius:4px;padding:4px;display:none;flex-direction:column;gap:4px}
-#editMenu button{background:#333}
 .track{display:flex;align-items:center;height:36px;padding:0 8px;border-bottom:1px solid #000}
+#startScreen{position:fixed;inset:0;background:#000c;z-index:999;display:flex;align-items:center;justify-content:center}
+#startBtn{font-size:24px;padding:20px 40px;border-radius:8px;background:var(--accent);color:#000;border:none;cursor:pointer}
 </style>
 </head>
 <body>
+
+<!-- 1.  user-gesture overlay -->
+<div id="startScreen">
+  <button id="startBtn">START</button>
+</div>
+
 <header>
   <input type="file" id="loadFile" accept="audio/*">
   <button id="recBtn">● Rec</button>
@@ -55,7 +61,6 @@ canvas{display:block;background:#0a0a0a}
       <button id="zoomOut">−</button>
       <button id="fitBtn">Fit</button>
     </div>
-    <div id="editMenu"></div>
     <div id="aiAdvice">
       <span id="aiText"></span>
       <button id="aiOk">Apply</button>
@@ -68,12 +73,18 @@ canvas{display:block;background:#0a0a0a}
 /* ==========  tiny state  ========== */
 const ac = new (window.AudioContext||webkitAudioContext)();
 let buffer, source, recNode, recBuffer=[];
-let zoom=1, offset=0;                       // pixels per sample
-let sel0=0, sel1=0, selecting=false;        // sample indices
+let zoom=1, offset=0;
+let sel0=0, sel1=0, selecting=false;
 let clipboard=null;
-const undoStack=[];                         // stores buffer clones
+const undoStack=[];
 const canvas=document.getElementById('wave');
 const ctx=canvas.getContext('2d');
+
+/* ==========  START overlay – unlocks Audio  ========== */
+document.getElementById('startBtn').onclick=async()=>{
+  if(ac.state==='suspended') await ac.resume();
+  document.getElementById('startScreen').style.display='none';
+};
 
 /* ==========  resize  ========== */
 function resize(){canvas.width=canvas.offsetWidth;canvas.height=canvas.offsetHeight-20;draw();}
@@ -82,22 +93,20 @@ window.addEventListener('resize',resize); resize();
 /* ==========  undo helper  ========== */
 function pushUndo(){
   if(!buffer)return;
-  const neo=cloneBuffer(buffer);
-  undoStack.push(neo);
-  if(undoStack.length>50)undoStack.shift(); // keep memory sane
+  undoStack.push(cloneBuffer(buffer));
+  if(undoStack.length>50)undoStack.shift();
 }
 function cloneBuffer(buf){
   const neo=ac.createBuffer(buf.numberOfChannels,buf.length,buf.sampleRate);
   for(let c=0;c<buf.numberOfChannels;c++)neo.copyToChannel(buf.getChannelData(c),c);
   return neo;
 }
+
 /* ==========  file load  ========== */
 document.getElementById('loadFile').onchange=async e=>{
-  const file=e.target.files[0];
-  if(!file)return;
+  const file=e.target.files[0]; if(!file)return;
   buffer=await ac.decodeAudioData(await file.arrayBuffer());
-  pushUndo();
-  fit();
+  pushUndo(); fit();
 };
 
 /* ==========  record  ========== */
@@ -108,10 +117,7 @@ document.getElementById('recBtn').onclick=async()=>{
   const stream=await navigator.mediaDevices.getUserMedia({audio:true});
   recNode=ac.createMediaStreamSource(stream);
   const proc=ac.createScriptProcessor(4096,1,1);
-  proc.onaudioprocess=e=>{
-    const data=e.inputBuffer.getChannelData(0);
-    recBuffer.push(new Float32Array(data));
-  };
+  proc.onaudioprocess=e=>recBuffer.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   recNode.connect(proc); proc.connect(ac.destination);
   document.getElementById('recBtn').style.background='#d00';
 };
@@ -142,8 +148,7 @@ document.getElementById('zoomOut').onclick=()=>{zoom/=1.5;draw();};
 document.getElementById('fitBtn').onclick =()=>fit();
 function fit(){
   if(!buffer)return;
-  zoom=(canvas.width-20)/buffer.length;
-  offset=0; draw();
+  zoom=(canvas.width-20)/buffer.length; offset=0; draw();
 }
 canvas.addEventListener('wheel',e=>{
   e.preventDefault();
@@ -163,8 +168,7 @@ canvas.onmousedown=e=>{
 canvas.onmousemove=e=>{
   if(!selecting)return;
   const rect=canvas.getBoundingClientRect();
-  sel1=pxToSample(e.clientX-rect.left);
-  draw();
+  sel1=pxToSample(e.clientX-rect.left); draw();
 };
 canvas.onmouseup=()=>{selecting=false;};
 
@@ -177,69 +181,55 @@ function draw(){
   const s1=Math.min(buffer.length,offset+Math.floor(w/zoom));
   ctx.strokeStyle='#0bf'; ctx.beginPath();
   for(let x=0;x<w;x++){
-    const s=offset+Math.floor(x/zoom);
-    if(s>=buffer.length)break;
-    const v=.5-data[s]*.4;
-    const y=v*h;
+    const s=offset+Math.floor(x/zoom); if(s>=buffer.length)break;
+    const v=.5-data[s]*.4, y=v*h;
     x?ctx.lineTo(x,y):ctx.moveTo(x,y);
   }
   ctx.stroke();
-  /* selection */
   if(sel0!==sel1){
     const x0=sampleToPx(Math.min(sel0,sel1)),x1=sampleToPx(Math.max(sel0,sel1));
-    ctx.fillStyle=sel0<sel1?'var(--sel)':'rgba(255,80,0,.25)';
-    ctx.fillRect(x0,0,x1-x0,h);
+    ctx.fillStyle='var(--sel)'; ctx.fillRect(x0,0,x1-x0,h);
   }
-  /* time bar */
-  const dur=buffer.length/ac.sampleRate;
-  const sel=Math.abs(sel1-sel0)/ac.sampleRate;
+  const dur=buffer.length/ac.sampleRate, sel=Math.abs(sel1-sel0)/ac.sampleRate;
   document.getElementById('timeInfo').textContent=toTime(dur);
   document.getElementById('selInfo').textContent='sel: '+toTime(sel);
 }
 function toTime(s){
-  const m=Math.floor(s/60),h=Math.floor(m/60);
-  const ms=Math.floor((s%1)*10);
+  const m=Math.floor(s/60),h=Math.floor(m/60),ms=Math.floor((s%1)*10);
   return `${h.toString().padStart(2,'0')}:${(m%60).toString().padStart(2,'0')}:${Math.floor(s%60).toString().padStart(2,'0')}.${ms}`;
 }
 
 /* ==========  edit ops  ========== */
-document.getElementById('cutBtn').onclick=()=>cut();
+document.getElementById('cutBtn').onclick=()=>{copy();del();};
 document.getElementById('cpyBtn').onclick=()=>copy();
 document.getElementById('pstBtn').onclick=()=>paste();
 document.getElementById('delBtn').onclick=()=>del();
 document.getElementById('undoBtn').onclick=()=>undo();
 
-function cut(){copy();del();}
 function copy(){
   if(!buffer||sel0===sel1)return;
   const [a,b]=[Math.min(sel0,sel1),Math.max(sel0,sel1)];
-  const len=b-a;
-  clipboard=ac.createBuffer(buffer.numberOfChannels,len,buffer.sampleRate);
-  for(let c=0;c<buffer.numberOfChannels;c++){
-    clipboard.copyToChannel(buffer.getChannelData(c).slice(a,b),c);
-  }
+  clipboard=ac.createBuffer(buffer.numberOfChannels,b-a,buffer.sampleRate);
+  for(let c=0;c<buffer.numberOfChannels;c++)clipboard.copyToChannel(buffer.getChannelData(c).slice(a,b),c);
 }
 function paste(){
   if(!clipboard||!buffer)return;
-  const ins=clipboard.length;
-  const neo=ac.createBuffer(buffer.numberOfChannels,buffer.length+ins,buffer.sampleRate);
-  const [a,b]=sel0<sel1?[sel0,sel1]:[sel0,sel0];
+  const ins=clipboard.length, neo=ac.createBuffer(buffer.numberOfChannels,buffer.length+ins,buffer.sampleRate);
+  const a=sel0<sel1?Math.min(sel0,sel1):sel0;
   for(let c=0;c<buffer.numberOfChannels;c++){
-    const src=buffer.getChannelData(c);
-    const dst=neo.getChannelData(c);
+    const src=buffer.getChannelData(c), dst=neo.getChannelData(c);
     dst.set(src.slice(0,a));
     dst.set(clipboard.getChannelData(c),a);
     dst.set(src.slice(a),a+ins);
   }
-  pushUndo(); buffer=neo; draw();
+  pushUndo(); buffer=neo; sel0=sel1=a+ins; draw();
 }
 function del(){
   if(!buffer||sel0===sel1)return;
   const [a,b]=[Math.min(sel0,sel1),Math.max(sel0,sel1)];
   const neo=ac.createBuffer(buffer.numberOfChannels,buffer.length-(b-a),buffer.sampleRate);
   for(let c=0;c<buffer.numberOfChannels;c++){
-    const src=buffer.getChannelData(c);
-    const dst=neo.getChannelData(c);
+    const src=buffer.getChannelData(c), dst=neo.getChannelData(c);
     dst.set(src.slice(0,a));
     dst.set(src.slice(b),a);
   }
@@ -247,33 +237,32 @@ function del(){
 }
 function undo(){
   if(!undoStack.length)return;
-  buffer=undoStack.pop();
-  sel0=sel1=0; draw();
+  buffer=undoStack.pop(); sel0=sel1=0; draw();
 }
 
 /* ==========  export WAV  ========== */
 document.getElementById('expBtn').onclick=()=>{
   if(!buffer)return;
   const worker2=new Worker(URL.createObjectURL(new Blob([`
-  onmessage=e=>{
-    const buf=e.data;
-    const len=buf.length;
-    const wav=new ArrayBuffer(44+len*2);
-    const v=new DataView(wav);
-    const writeString=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
-    writeString(0,'RIFF'); v.setUint32(4,36+len*2,true);
-    writeString(8,'WAVE');
-    writeString(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true);
-    v.setUint16(22,1,true); v.setUint32(24,`+ac.sampleRate+`),true);
-    v.setUint32(28,`+ac.sampleRate+`*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
-    writeString(36,'data'); v.setUint32(40,len*2,true);
-    let off=44;
-    for(let i=0;i<len;i++){
-      const s=Math.max(-1,Math.min(1,buf[i]));
-      v.setInt16(off,s*0x7FFF,true); off+=2;
-    }
-    postMessage(wav,[wav]);
-  };
+    onmessage=e=>{
+      const buf=e.data;
+      const len=buf.length;
+      const wav=new ArrayBuffer(44+len*2);
+      const v=new DataView(wav);
+      const writeString=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+      writeString(0,'RIFF'); v.setUint32(4,36+len*2,true);
+      writeString(8,'WAVE');
+      writeString(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true);
+      v.setUint16(22,1,true); v.setUint32(24,`+(ac.sampleRate)+`,true);
+      v.setUint32(28,`+(ac.sampleRate)+`*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+      writeString(36,'data'); v.setUint32(40,len*2,true);
+      let off=44;
+      for(let i=0;i<len;i++){
+        const s=Math.max(-1,Math.min(1,buf[i]));
+        v.setInt16(off,s*0x7FFF,true); off+=2;
+      }
+      postMessage(wav,[wav]);
+    };
   `],{type:'application/javascript'})));
   worker2.postMessage(buffer.getChannelData(0));
   worker2.onmessage=e=>{
@@ -289,26 +278,24 @@ document.getElementById('expBtn').onclick=()=>{
 document.getElementById('aiBtn').onclick=()=>{
   if(!buffer)return;
   const worker=new Worker(URL.createObjectURL(new Blob([`
-  onmessage=e=>{
-    const buf=e.data.buf;
-    let rms=0, max=0, head=0, tail=buf.length-1;
-    for(let i=0;i<buf.length;i++){
-      const a=Math.abs(buf[i]);
-      if(a>max)max=a;
-      rms+=a*a;
-      if(!head&&a>0.01)head=i;
-    }
-    rms=Math.sqrt(rms/buf.length);
-    for(let i=buf.length-1;i>0;i--)if(Math.abs(buf[i])>0.01){tail=i;break;}
-    const reply={text:'',type:'',factor:1,start:0,end:1};
-    if(max>0.95){reply.text='Clipping detected – reduce gain 20 %'; reply.type='gain'; reply.factor=0.8;}
-    else if(rms<0.05){reply.text='Signal very low – boost 6 dB'; reply.type='gain'; reply.factor=2;}
-    else if(head>1000||tail<buf.length-1000){
-      reply.text='Trim silence at start/end'; reply.type='trim'; reply.start=head/buf.length; reply.end=tail/buf.length;
-    }else reply.text='No obvious issues – sounds good!';
-    postMessage(reply);
-  };
-  `],{type:'application/javascript'}));
+    onmessage=e=>{
+      const buf=e.data.buf;
+      let rms=0, max=0, head=0, tail=buf.length-1;
+      for(let i=0;i<buf.length;i++){
+        const a=Math.abs(buf[i]);
+        if(a>max)max=a; rms+=a*a; if(!head&&a>0.01)head=i;
+      }
+      rms=Math.sqrt(rms/buf.length);
+      for(let i=buf.length-1;i>0;i--)if(Math.abs(buf[i])>0.01){tail=i;break;}
+      const reply={text:'',type:'',factor:1,start:0,end:1};
+      if(max>0.95){reply.text='Clipping detected – reduce gain 20 %'; reply.type='gain'; reply.factor=0.8;}
+      else if(rms<0.05){reply.text='Signal very low – boost 6 dB'; reply.type='gain'; reply.factor=2;}
+      else if(head>1000||tail<buf.length-1000){
+        reply.text='Trim silence at start/end'; reply.type='trim'; reply.start=head/buf.length; reply.end=tail/buf.length;
+      }else reply.text='No obvious issues – sounds good!';
+      postMessage(reply);
+    };
+  `],{type:'application/javascript'})));
   worker.postMessage({buf:buffer.getChannelData(0)});
   worker.onmessage=e=>{
     const ad=e.data;
@@ -328,9 +315,7 @@ document.getElementById('aiBtn').onclick=()=>{
       if(ad.type==='trim'){
         const a=Math.floor(ad.start*buffer.length), b=Math.floor(ad.end*buffer.length);
         const neo=ac.createBuffer(buffer.numberOfChannels,b-a,buffer.sampleRate);
-        for(let c=0;c<buffer.numberOfChannels;c++){
-          neo.copyToChannel(buffer.getChannelData(c).slice(a,b),c);
-        }
+        for(let c=0;c<buffer.numberOfChannels;c++)neo.copyToChannel(buffer.getChannelData(c).slice(a,b),c);
         pushUndo(); buffer=neo; sel0=sel1=0; draw();
       }
     };
